@@ -1,0 +1,48 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Uploaded videos and generated processing data
+data/
+*.mp4
+*.mov
+*.m4v
+*.mp3
+*.wav
+*.ogg
+clips_out/
+work/
+fonts/
+
+# Generated pipeline results
+clips.json
+result.json
+run_report.json
+
+# Local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Temporary files
+*.tmp
+*.temp

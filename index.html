@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0c14">
+<title>SmartixCut · Smart AI Video Clips in 60 Seconds</title>
+<style>
+  :root {
+    --bg: #0a0c14; --card: #0f1220; --card2: #141829; --line: #1f2437; --line2: #2a3150;
+    --text: #e9ebf5; --muted: #8b91a7; --accent: #7a22e6; --accent2: #5b21d6; --blue: #3b82f6;
+    --ok: #34d399; --bad: #f87171; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans Tamil", "Noto Sans Devanagari", sans-serif;
+    line-height: 1.5; padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  .top {
+    position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; background: rgba(10,12,20,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: .2px; }
+  .logo-mark { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, #8b3cf0, #3b82f6); display: grid; place-items: center; font-size: 14px; }
+  .top .spacer { flex: 1; }
+  .link-btn { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 8px; border-radius: 8px; }
+  .link-btn:hover { color: var(--text); }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 22px 16px 60px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px;
+    border: 1px solid #2c2760; background: #14122e; color: #c9c6ff; font-size: 14px;
+  }
+  h1 { font-size: clamp(32px, 7vw, 52px); line-height: 1.08; margin: 18px 0 12px; letter-spacing: -.5px; }
+  .sub { color: var(--muted); font-size: 17px; max-width: 620px; margin: 0 0 16px; }
+  .made { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 15px; margin-bottom: 8px; }
+  .made .ico { width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--line2); display: grid; place-items: center; background: #0f1530; color: var(--blue); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 22px; margin-top: 22px; }
+  .step-label { color: var(--blue); font-size: 13px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
+  .card h2 { margin: 6px 0 14px; font-size: 24px; letter-spacing: -.2px; }
+  .row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .tabs { display: inline-flex; background: #0b0e1b; border: 1px solid var(--line2); border-radius: 16px; padding: 5px; gap: 4px; }
+  .tab { border: 0; background: none; color: var(--muted); font: inherit; padding: 11px 16px; border-radius: 12px; cursor: pointer; min-height: 44px; }
+  .tab.on { background: #25285a; color: #fff; }
+  .tab[disabled] { cursor: not-allowed; opacity: .55; }
+  .soon { font-size: 11px; background: #2a3150; color: #b8bfdc; padding: 2px 7px; border-radius: 999px; margin-left: 6px; }
+  .drop {
+    display: block; border: 1.5px dashed var(--line2); border-radius: 18px; padding: 36px 16px; text-align: center;
+    cursor: pointer; transition: border-color .15s, background .15s; margin-top: 8px;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #12132a; }
+  .drop .ico { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 18px; background: #1d1747; border: 1px solid #3a2f7a; display: grid; place-items: center; font-size: 26px; }
+  .drop b { font-weight: 600; } .drop a { color: #4f8cff; text-decoration: none; }
+  .hint { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .note { background: #0c0f1c; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 14px; color: var(--muted); font-size: 14px; }
+  .file { display: grid; grid-template-columns: 96px 1fr auto; gap: 14px; align-items: center; background: var(--card2); border: 1px solid var(--line2); border-radius: 16px; padding: 12px; margin-top: 8px; }
+  .file video { width: 96px; height: 96px; object-fit: cover; border-radius: 10px; background: #000; }
+  .file .name { font-weight: 600; word-break: break-word; }
+  .file .meta { color: var(--muted); font-size: 14px; }
+  textarea {
+    width: 100%; min-height: 108px; resize: vertical; background: #0b0e1b; color: var(--text);
+    border: 1px solid var(--line2); border-radius: 16px; padding: 14px; font: inherit; font-size: 16px;
+  }
+  textarea:focus { outline: 2px solid #4b2fb8; border-color: transparent; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .chip { border: 1px solid var(--line2); background: #0d1020; color: var(--text); padding: 10px 16px; border-radius: 999px; font: inherit; font-size: 15px; cursor: pointer; min-height: 44px; }
+  .chip.on { border-color: var(--accent); background: #1b1236; }
+  .divider { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
+  .field-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .field-title h2 { margin: 4px 0 0; font-size: 22px; }
+  .tag { font-size: 14px; color: var(--muted); border: 1px solid var(--line2); border-radius: 12px; padding: 7px 12px; background: #0d1020; white-space: nowrap; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+  .opt { border: 1px solid var(--line2); background: #0d1020; color: var(--text); border-radius: 16px; padding: 14px 10px; font: inherit; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px; min-height: 56px; }
+  .opt small { color: var(--muted); font-size: 12px; }
+  .opt.on { border-color: #3b82f6; background: #0f1d3d; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 16px; border: 1px solid var(--line2);
+    background: #151a2e; color: var(--text); font: inherit; font-weight: 600; padding: 13px 18px; cursor: pointer; text-decoration: none; min-height: 48px;
+  }
+  .btn:hover { border-color: #3b4470; }
+  .btn.primary { width: 100%; border: 0; background: linear-gradient(135deg, #7a22e6, #5b21d6); color: #fff; font-size: 18px; padding: 17px; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; filter: none; }
+  .btn.small { padding: 9px 14px; min-height: 40px; font-size: 14px; }
+  .btn.danger { color: var(--bad); }
+  .banner { background: #2a1a10; border: 1px solid #6b3f1d; color: #ffd9b0; border-radius: 14px; padding: 12px 16px; margin-top: 18px; font-size: 14px; }
+  .banner ul { margin: 6px 0 0; padding-left: 20px; }
+  .hidden { display: none !important; }
+  .bar { height: 10px; background: #0b0e1b; border: 1px solid var(--line2); border-radius: 999px; overflow: hidden; margin: 14px 0 18px; }
+  .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #7a22e6, #3b82f6); transition: width .4s ease; }
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .steps li { display: flex; align-items: center; gap: 12px; color: var(--muted); }
+  .dot { width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--line2); display: grid; place-items: center; font-size: 13px; flex: none; }
+  .steps li.active { color: var(--text); } .steps li.active .dot { border-color: var(--accent); }
+  .steps li.done { color: var(--text); } .steps li.done .dot { background: var(--ok); border-color: var(--ok); color: #05261b; }
+  .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #3a2f7a; border-top-color: #a78bfa; animation: sp .8s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .err { background: #2a1114; border: 1px solid #6b2229; color: #ffc9ce; border-radius: 14px; padding: 14px 16px; margin-top: 16px; }
+  .err pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #e8a8ad; margin: 8px 0 0; max-height: 180px; overflow: auto; }
+  .clips { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; margin-top: 16px; }
+  .clip { background: var(--card2); border: 1px solid var(--line2); border-radius: 20px; overflow: hidden; display: flex; flex-direction: column; }
+  .clip video { width: 100%; aspect-ratio: 9 / 16; background: #000; display: block; }
+  .clip .body { padding: 14px; display: grid; gap: 8px; }
+  .clip h3 { margin: 0; font-size: 17px; line-height: 1.35; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #c9c6ff; background: #1b1740; border: 1px solid #332b73; padding: 3px 10px; border-radius: 999px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .tags { color: #8fb2ff; font-size: 14px; word-break: break-word; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .actions .btn { flex: 1; }
+  details.why summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  details.why p { margin: 6px 0 0; font-size: 14px; color: #b9bdd3; }
+  .jobs { display: grid; gap: 10px; margin-top: 12px; }
+  .job { display: flex; align-items: center; gap: 12px; background: var(--card2); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; cursor: pointer; text-align: left; width: 100%; color: inherit; font: inherit; }
+  .job:hover { border-color: #3b4470; }
+  .job .t { flex: 1; min-width: 0; }
+  .job .t b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: .6px; }
+  .st.done { background: #0d2b22; color: var(--ok); } .st.failed { background: #2e1215; color: var(--bad); }
+  .st.run { background: #2b230d; color: var(--warn); }
+  .dev { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; padding: 10px 0 30px; }
+  @media (max-width: 520px) {
+    .card { padding: 18px; border-radius: 20px; }
+    .file { grid-template-columns: 72px 1fr; } .file video { width: 72px; height: 72px; }
+    .file .btn { grid-column: 1 / -1; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="logo"><span class="logo-mark">✂</span> SmartixCut</div>
+  <div class="spacer"></div>
+  <button class="link-btn" id="historyBtn" type="button">My clips</button>
+</header>
+
+<main class="wrap">
+  <span class="badge">✦ Made for the 60-second workflow</span>
+  <h1>Smart AI Video Clips in 60&nbsp;Seconds</h1>
+  <p class="sub">Upload a video, say what you want, and get captioned vertical clips for Reels, Shorts and TikTok — in Tamil, Hindi, Marathi or English.</p>
+  <div class="made"><span class="ico">⚡</span> Designed for creators in India</div>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <!-- 1. builder -->
+  <section class="card" id="builder">
+    <div class="row">
+      <div>
+        <div class="step-label">01 / Source</div>
+        <h2>Start with a video</h2>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab on" type="button" role="tab" aria-selected="true">Upload</button>
+        <button class="tab" type="button" role="tab" disabled title="Coming soon">🔗 YouTube link <span class="soon">soon</span></button>
+      </div>
+    </div>
+
+    <label class="drop" id="drop" for="fileInput">
+      <div class="ico">🎬</div>
+      <div><b>Drop a video here, or <a>browse files</a></b></div>
+      <div class="hint">MP4 or MOV · up to <span id="maxGb">2</span> GB · up to <span id="maxMin">30</span> minutes</div>
+    </label>
+    <input id="fileInput" type="file" accept=".mp4,.mov,.m4v,video/mp4,video/quicktime" class="hidden">
+
+    <div id="fileCard" class="file hidden">
+      <video id="filePreview" muted playsinline preload="metadata"></video>
+      <div>
+        <div class="name" id="fileName"></div>
+        <div class="meta" id="fileMeta"></div>
+      </div>
+      <button class="btn small" type="button" id="fileClear">Change</button>
+    </div>
+
+    <div class="note">Your video is uploaded to this server only to make your clips. Originals are deleted after a few days.</div>
+
+    <hr class="divider">
+
+    <div class="step-label">02 / Brief</div>
+    <h2>What clips do you want?</h2>
+    <textarea id="prompt" maxlength="600" placeholder="e.g. Best hooks and motivating moments for Reels. Skip the intro."></textarea>
+    <div class="chips" id="chips"></div>
+
+    <div style="margin-top:20px">
+      <div class="muted" style="margin-bottom:10px">Language spoken in the video</div>
+      <div class="opts" id="langs"></div>
+    </div>
+    <div style="margin-top:18px">
+      <div class="muted" style="margin-bottom:10px">Number of clips</div>
+      <div class="opts" id="counts" style="max-width:260px"></div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="field-title">
+      <div>
+        <div class="step-label">03 / Platform</div>
+        <h2>Choose your format</h2>
+      </div>
+      <span class="tag">Vertical · 9:16</span>
+    </div>
+    <div class="opts" id="platforms"></div>
+
+    <div style="margin-top:22px">
+      <button class="btn primary" id="go" type="button" disabled>Generate clips →</button>
+      <div class="hint" id="goHint" style="text-align:center">Choose a video to begin.</div>
+    </div>
+  </section>
+
+  <!-- 2. progress -->
+  <section class="card hidden" id="progress" aria-live="polite">
+    <div class="step-label">Working on it</div>
+    <h2 id="progTitle">Making your clips…</h2>
+    <div class="bar"><i id="barFill"></i></div>
+    <ul class="steps" id="steps"></ul>
+    <div class="muted" id="elapsed" style="margin-top:14px"></div>
+    <div id="errBox" class="err hidden"></div>
+    <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap">
+      <button class="btn hidden" type="button" id="retryBtn">Try again</button>
+      <button class="btn hidden" type="button" id="newBtn1">Start over</button>
+    </div>
+  </section>
+
+  <!-- 3. results -->
+  <section class="card hidden" id="results">
+    <div class="row">
+      <div>
+        <div class="step-label">Ready</div>
+        <h2 id="resTitle">Your clips</h2>
+        <div class="muted" id="resMeta"></div>
+      </div>
+      <button class="btn" type="button" id="newBtn2">＋ New video</button>
+    </div>
+    <div class="clips" id="clips"></div>
+    <div class="dev hidden" id="devInfo"></div>
+  </section>
+
+  <!-- 4. history -->
+  <section class="card" id="history">
+    <div class="step-label">History</div>
+    <h2>Your recent clips</h2>
+    <div class="jobs" id="jobs"><div class="muted">Nothing yet.</div></div>
+  </section>
+</main>
+
+<footer>SmartixCut · AI clips for Indian creators</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var DEV = new URLSearchParams(location.search).has("dev");
+  var LANGS = [["ta", "தமிழ்", "Tamil"], ["hi", "हिन्दी", "Hindi"], ["mr", "मराठी", "Marathi"], ["en", "English", "English"]];
+  var PLATFORMS = [["reels", "Reels", "Instagram"], ["shorts", "Shorts", "YouTube"], ["tiktok", "TikTok", "TikTok"]];
+  var COUNTS = [3, 5];
+  var CHIPS = ["Funny moments", "Best hooks", "Tutorial steps", "Highlight reel"];
+  var STEPS = [
+    ["uploading", "Uploading your video"],
+    ["transcribing", "Listening and transcribing"],
+    ["finding_moments", "Finding the best moments"],
+    ["rendering", "Cutting vertical clips with captions"]
+  ];
+  var CEILING = { uploading: 15, uploaded: 15, transcribing: 66, finding_moments: 80, rendering: 98, done: 100 };
+
+  var state = { file: null, language: "ta", platform: "reels", count: 3, busy: false,
+                jobId: null, timer: null, tick: null, shown: 0, startedAt: 0, maxBytes: 2 * 1024 * 1024 * 1024, lastVideoKey: null };
+
+  function $(id) { return document.getElementById(id); }
+  function h(tag, props) {
+    var el = document.createElement(tag);
+    props = props || {};
+    Object.keys(props).forEach(function (k) {
+      if (k === "class") el.className = props[k];
+      else if (k === "text") el.textContent = props[k];
+      else if (k.indexOf("on") === 0) el.addEventListener(k.slice(2), props[k]);
+      else el.setAttribute(k, props[k]);
+    });
+    function add(kid) {
+      if (kid == null) return;
+      if (Array.isArray(kid)) { kid.forEach(add); return; }
+      el.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+    }
+    for (var i = 2; i < arguments.length; i++) add(arguments[i]);
+    return el;
+  }
+  function show(el, on) { el.classList.toggle("hidden", !on); }
+  function fmtSize(b) { return b > 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(1) + " MB"; }
+  function fmtTime(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); }
+
+  function errText(data, status) {
+    if (data && typeof data.detail === "string") return data.detail;
+    if (data && Array.isArray(data.detail) && data.detail[0]) return data.detail[0].msg || "Invalid request.";
+    return "Something went wrong (" + status + "). Please try again.";
+  }
+  function api(path, opts) {
+    return fetch(path, opts).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (data) {
+        if (!r.ok) throw new Error(errText(data, r.status));
+        return data;
+      });
+    });
+  }
+
+  // ---------- builder UI ----------
+  function option(group, items, key, render) {
+    var box = $(group);
+    box.textContent = "";
+    items.forEach(function (it) {
+      var id = Array.isArray(it) ? it[0] : it;
+      var b = h("button", { type: "button", class: "opt" + (state[key] === id ? " on" : ""), "data-id": id }, render(it));
+      b.addEventListener("click", function () {
+        state[key] = id;
+        option(group, items, key, render);
+      });
+      box.appendChild(b);
+    });
+  }
+  function renderOptions() {
+    option("langs", LANGS, "language", function (l) { return [h("span", { text: l[1] }), h("small", { text: l[2] })]; });
+    option("platforms", PLATFORMS, "platform", function (p) { return [h("span", { text: p[1] }), h("small", { text: p[2] })]; });
+    option("counts", COUNTS, "count", function (c) { return [h("span", { text: String(c) + " clips" })]; });
+  }
+
+  function renderChips() {
+    var box = $("chips");
+    box.textContent = "";
+    CHIPS.forEach(function (c) {
+      var on = $("prompt").value.toLowerCase().indexOf(c.toLowerCase()) !== -1;
+      var b = h("button", { type: "button", class: "chip" + (on ? " on" : ""), text: c });
+      b.addEventListener("click", function () {
+        var ta = $("prompt"), v = ta.value, low = v.toLowerCase(), i = low.indexOf(c.toLowerCase());
+        if (i !== -1) {
+          v = (v.slice(0, i) + v.slice(i + c.length)).replace(/^[,\s]+|[,\s]+$/g, "").replace(/\s*,\s*,/g, ",");
+        } else {
+          v = v.trim() ? v.trim().replace(/[,.\s]+$/, "") + ", " + c.toLowerCase() : c;
+        }
+        ta.value = v;
+        renderChips();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function setFile(file) {
+    var ext = (file.name.split(".").pop() || "").toLowerCase();
+    if (["mp4", "mov", "m4v"].indexOf(ext) === -1) { return flash("Please choose an MP4 or MOV video."); }
+    if (file.size > state.maxBytes) { return flash("That file is larger than " + (state.maxBytes / 1073741824) + " GB."); }
+    state.file = file;
+    state.lastVideoKey = null;
+    var url = URL.createObjectURL(file);
+    var v = $("filePreview");
+    v.src = url;
+    $("fileName").textContent = file.name;
+    $("fileMeta").textContent = fmtSize(file.size);
+    v.onloadedmetadata = function () {
+      $("fileMeta").textContent = fmtSize(file.size) + " · " + fmtTime(v.duration);
+    };
+    show($("drop"), false); show($("fileCard"), true);
+    $("go").disabled = false;
+    $("goHint").textContent = "Takes about a minute for a 4-minute video.";
+  }
+  function clearFile() {
+    state.file = null; state.lastVideoKey = null;
+    $("fileInput").value = "";
+    var v = $("filePreview"); v.removeAttribute("src"); v.load();
+    show($("drop"), true); show($("fileCard"), false);
+    $("go").disabled = true;
+    $("goHint").textContent = "Choose a video to begin.";
+  }
+  function flash(msg) { $("goHint").textContent = msg; $("goHint").style.color = "#f87171"; setTimeout(function () { $("goHint").style.color = ""; }, 4000); }
+
+  // ---------- upload + job ----------
+  function upload(file, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/uploads");
+      xhr.upload.onprogress = function (e) { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = function () {
+        var data = null; try { data = JSON.parse(xhr.responseText); } catch (e) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data); else reject(new Error(errText(data, xhr.status)));
+      };
+      xhr.onerror = function () { reject(new Error("Couldn't reach the server. Is it running?")); };
+      var fd = new FormData(); fd.append("file", file);
+      xhr.send(fd);
+    });
+  }
+
+  function jobBody(videoKey) {
+    return JSON.stringify({ video_key: videoKey, prompt: $("prompt").value.trim(), language: state.language,
+                            platform: state.platform, num_clips: state.count });
+  }
+  function createJob(videoKey) {
+    return api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: jobBody(videoKey) });
+  }
+
+  function go() {
+    if (!state.file || state.busy) return;
+    state.busy = true;
+    showProgress("Making your clips…");
+    state.startedAt = Date.now();
+    drawSteps("uploading");
+    setBar(2);
+    $("elapsed").textContent = "Uploading… 0%";
+
+    var chain = state.lastVideoKey ? Promise.resolve({ video_key: state.lastVideoKey })
+      : upload(state.file, function (p) {
+          setBar(2 + p * 12);
+          $("elapsed").textContent = "Uploading… " + Math.round(p * 100) + "%";
+        });
+    chain.then(function (up) {
+      state.lastVideoKey = up.video_key;
+      return createJob(up.video_key);
+    }).then(function (job) {
+      state.jobId = job.job_id;
+      startPolling(job.job_id);
+    }).catch(function (e) {
+      state.busy = false;
+      showFailure(e.message, "");
+    });
+  }
+
+  // ---------- progress ----------
+  function showProgress(title) {
+    show($("builder"), false); show($("results"), false); show($("progress"), true);
+    $("progTitle").textContent = title;
+    show($("errBox"), false); show($("retryBtn"), false); show($("newBtn1"), false);
+    state.shown = 0;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function setBar(p) { state.shown = Math.max(state.shown, p); $("barFill").style.width = Math.min(100, state.shown) + "%"; }
+  function drawSteps(current) {
+    var idx = current === "uploaded" ? 1 : STEPS.map(function (s) { return s[0]; }).indexOf(current);
+    var ul = $("steps"); ul.textContent = "";
+    STEPS.forEach(function (s, i) {
+      var cls = current === "done" || i < idx ? "done" : (i === idx ? "active" : "");
+      var dot = h("span", { class: "dot" }, cls === "done" ? "✓" : (cls === "active" ? h("span", { class: "spin" }) : String(i + 1)));
+      ul.appendChild(h("li", { class: cls }, dot, s[1]));
+    });
+  }
+  function startPolling(id) {
+    stopPolling();
+    state.busy = true;
+    var poll = function () {
+      api("/api/jobs/" + id).then(function (job) { applyJob(job); }).catch(function () { /* keep trying */ });
+    };
+    poll();
+    state.timer = setInterval(poll, 1500);
+    state.tick = setInterval(function () {      // creep the bar forward inside a stage
+      var ceil = CEILING[state.currentStatus] || 15;
+      if (state.shown < ceil - 1) setBar(state.shown + 0.35);
+      if (state.startedAt && state.currentStatus && ["done", "failed"].indexOf(state.currentStatus) === -1) {
+        $("elapsed").textContent = "Elapsed " + fmtTime((Date.now() - state.startedAt) / 1000);
+      }
+    }, 500);
+  }
+  function stopPolling() { clearInterval(state.timer); clearInterval(state.tick); state.timer = state.tick = null; }
+
+  function applyJob(job) {
+    state.currentStatus = job.status;
+    if (job.status === "done") { stopPolling(); state.busy = false; loadHistory(); return showResults(job); }
+    if (job.status === "failed") { stopPolling(); state.busy = false; loadHistory(); return showFailure(job.error, job.error_detail); }
+    show($("progress"), true); show($("results"), false);
+    drawSteps(job.status);
+    setBar(job.progress);
+    $("progTitle").textContent = job.status === "uploaded" ? "Waiting for a free worker…" : "Making your clips…";
+  }
+
+  function showFailure(msg, detail) {
+    show($("builder"), false); show($("results"), false); show($("progress"), true);
+    $("progTitle").textContent = "That didn't work";
+    $("barFill").style.width = "0";
+    $("steps").textContent = ""; $("elapsed").textContent = "";
+    var box = $("errBox"); box.textContent = "";
+    box.appendChild(h("div", { text: msg || "Something went wrong." }));
+    if (detail && DEV) { box.appendChild(h("pre", { text: detail })); }
+    show(box, true);
+    show($("retryBtn"), !!state.lastVideoKey); show($("newBtn1"), true);
+  }
+
+  // ---------- results ----------
+  function showResults(job) {
+    show($("builder"), false); show($("progress"), false); show($("results"), true);
+    $("resTitle").textContent = job.clips.length + (job.clips.length === 1 ? " clip" : " clips") + " ready";
+    var took = job.total_seconds ? " · made in " + Math.round(job.total_seconds) + "s" : "";
+    $("resMeta").textContent = (job.video_name || "") + took;
+    var box = $("clips"); box.textContent = "";
+    job.clips.forEach(function (c) { box.appendChild(clipCard(c)); });
+
+    var dev = $("devInfo");
+    if (DEV) {
+      var st = job.stage_seconds || {};
+      dev.textContent = "stages: " + Object.keys(st).map(function (k) { return k + " " + st[k] + "s"; }).join(" · ") +
+        (job.cost_usd != null ? " · API cost ≈ $" + job.cost_usd.toFixed(4) + " (₹" + job.cost_inr + ")" : "");
+      show(dev, true);
+    } else show(dev, false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function clipCard(c) {
+    var video = h("video", { controls: "", playsinline: "", preload: "metadata", src: c.video_url + "#t=0.1" });
+    var caption = c.title + (c.hashtags && c.hashtags.length ? "\n" + c.hashtags.join(" ") : "");
+    var copy = h("button", { class: "btn small", type: "button", text: "Copy caption" });
+    copy.addEventListener("click", function () {
+      var done = function () { copy.textContent = "Copied ✓"; setTimeout(function () { copy.textContent = "Copy caption"; }, 1800); };
+      if (navigator.clipboard) navigator.clipboard.writeText(caption).then(done, function () { window.prompt("Copy this caption:", caption); });
+      else window.prompt("Copy this caption:", caption);
+    });
+    var dl = h("a", { class: "btn small", href: c.download_url, download: "", text: "Download" });
+    return h("article", { class: "clip" }, video,
+      h("div", { class: "body" },
+        h("div", {}, h("span", { class: "pill", text: "Clip " + c.n }), " ",
+          h("span", { class: "muted", text: fmtTime(c.duration) + " · from " + fmtTime(c.start) })),
+        h("h3", { text: c.title || "Untitled clip" }),
+        c.hashtags && c.hashtags.length ? h("div", { class: "tags", text: c.hashtags.join(" ") }) : null,
+        c.reason ? h("details", { class: "why" }, h("summary", { text: "Why this clip" }), h("p", { text: c.reason })) : null,
+        h("div", { class: "actions" }, dl, copy)));
+  }
+
+  // ---------- history ----------
+  function loadHistory() {
+    api("/api/jobs?limit=12").then(function (data) {
+      var box = $("jobs"); box.textContent = "";
+      if (!data.jobs.length) { box.appendChild(h("div", { class: "muted", text: "Nothing yet." })); return; }
+      data.jobs.forEach(function (j) {
+        var cls = j.status === "done" ? "done" : (j.status === "failed" ? "failed" : "run");
+        var label = j.status === "done" ? j.clips.length + " clips" : (j.status === "failed" ? "failed" : "working");
+        var when = new Date(j.created_at * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+        var row = h("button", { class: "job", type: "button" },
+          h("div", { class: "t" }, h("b", { text: j.video_name || "Video" }),
+            h("span", { class: "muted", text: when + (j.prompt ? " · " + j.prompt : "") })),
+          h("span", { class: "st " + cls, text: label }));
+        row.addEventListener("click", function () { openJob(j); });
+        var del = h("button", { class: "btn small danger", type: "button", text: "Delete", "aria-label": "Delete this job" });
+        del.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (!confirm("Delete these clips?")) return;
+          api("/api/jobs/" + j.id, { method: "DELETE" }).then(loadHistory).catch(function (err) { alert(err.message); });
+        });
+        var wrap = h("div", { style: "display:flex; gap:8px; align-items:stretch" }, row, ["done", "failed"].indexOf(j.status) !== -1 ? del : null);
+        row.style.flex = "1";
+        box.appendChild(wrap);
+      });
+    }).catch(function () {});
+  }
+  function openJob(j) {
+    stopPolling();
+    state.jobId = j.id;
+    state.currentStatus = j.status;
+    state.lastVideoKey = j.video_key;
+    if (j.status === "done") showResults(j);
+    else if (j.status === "failed") showFailure(j.error, j.error_detail);
+    else { showProgress("Making your clips…"); state.startedAt = j.created_at * 1000; startPolling(j.id); }
+  }
+
+  function reset() {
+    stopPolling(); state.busy = false;
+    show($("progress"), false); show($("results"), false); show($("builder"), true);
+    clearFile();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  // ---------- wiring ----------
+  function init() {
+    renderOptions(); renderChips();
+    $("prompt").addEventListener("input", renderChips);
+
+    var drop = $("drop");
+    ["dragenter", "dragover"].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add("over"); }); });
+    ["dragleave", "drop"].forEach(function (ev) { drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove("over"); }); });
+    drop.addEventListener("drop", function (e) { var f = e.dataTransfer && e.dataTransfer.files[0]; if (f) setFile(f); });
+    $("fileInput").addEventListener("change", function () { if (this.files[0]) setFile(this.files[0]); });
+    $("fileClear").addEventListener("click", clearFile);
+    $("go").addEventListener("click", go);
+    $("retryBtn").addEventListener("click", function () {
+      if (!state.lastVideoKey) return;
+      showProgress("Trying again…"); state.startedAt = Date.now(); state.busy = true; drawSteps("uploaded");
+      createJob(state.lastVideoKey).then(function (job) { state.jobId = job.job_id; startPolling(job.job_id); })
+        .catch(function (e) { state.busy = false; showFailure(e.message, ""); });
+    });
+    $("newBtn1").addEventListener("click", reset);
+    $("newBtn2").addEventListener("click", reset);
+    $("historyBtn").addEventListener("click", function () { $("history").scrollIntoView({ behavior: "smooth" }); });
+
+    api("/api/health").then(function (hl) {
+      state.maxBytes = (hl.max_upload_gb || 2) * 1024 * 1024 * 1024;
+      $("maxGb").textContent = hl.max_upload_gb; $("maxMin").textContent = hl.max_video_minutes;
+      if (!hl.ok) {
+        var b = $("banner"); b.textContent = "";
+        b.appendChild(h("b", { text: "Server setup is incomplete:" }));
+        b.appendChild(h("ul", {}, hl.problems.map(function (p) { return h("li", { text: p }); })));
+        show(b, true);
+      }
+    }).catch(function () {
+      var b = $("banner"); b.textContent = "Can't reach the SmartixCut server. Start it with:  uvicorn api:app --port 8000";
+      show(b, true);
+    });
+    loadHistory();
+    setInterval(function () { if (!state.busy) loadHistory(); }, 15000);
+  }
+  init();
+})();
+</script>
+</body>
+</html>
