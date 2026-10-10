@@ -29,6 +29,8 @@ from pathlib import Path
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
+from typing import Literal
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -442,12 +444,24 @@ async def upload(file: UploadFile = File(...)):
     return {"video_key": key, **meta}
 
 
+class CaptionOpts(BaseModel):
+    enabled: bool = True
+    style: Literal["outline", "box", "karaoke"] = "outline"
+    size: Literal["small", "medium", "large"] = "medium"
+    position: Literal["bottom", "middle", "top"] = "bottom"
+    color: str = Field(default="#FFFFFF", pattern=r"^#[0-9a-fA-F]{6}$")
+    highlight: str = Field(default="#FFE600", pattern=r"^#[0-9a-fA-F]{6}$")
+    uppercase: bool = False
+
+
 class JobIn(BaseModel):
     video_key: str = Field(pattern=r"^[0-9a-f]{32}$")
     prompt: str = Field(default="", max_length=600)
     language: str = "ta"
     platform: str = "reels"
     num_clips: int = Field(default=3, ge=1, le=5)
+    quality: Literal["hd", "fast"] = "hd"
+    captions: CaptionOpts = Field(default_factory=CaptionOpts)
 
 
 @app.post("/api/jobs", status_code=201)
@@ -474,6 +488,11 @@ def create_job(body: JobIn):
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, now, now, "uploaded", body.video_key, meta["name"], str(video_path),
              body.prompt.strip(), body.language, body.platform, body.num_clips))
+    job_dir = JOBS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "options.json").write_text(
+        json.dumps({"quality": body.quality, "captions": body.captions.model_dump()}),
+        encoding="utf-8")
     executor.submit(run_job, job_id)
     return {"job_id": job_id, "status": "uploaded"}
 
