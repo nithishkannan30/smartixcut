@@ -37,6 +37,9 @@ clips.json
 result.json
 run_report.json
 
+# Local feature planning
+FEATURES.txt
+
 # Local databases and logs
 *.db
 *.sqlite

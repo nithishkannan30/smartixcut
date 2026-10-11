@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pydantic
+PyJWT
+groq
+numpy
+cloudinary
+google-genai
