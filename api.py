@@ -1,18 +1,19 @@
 """
-SmartixCut API + web app (one process).
+SmartixCut API + web host (one process).
 
 Run:   uvicorn api:app --reload --port 8000
-Open:  http://localhost:8000
+Open:  http://localhost:8000   (serves the React build from web/dist, see README)
 
-Endpoints (the contract Shaizan's frontend can call too):
+Every /api endpoint except /api/health and /api/auth/* needs a logged-in user (cookie).
+    POST   /api/auth/signup | /api/auth/login | /api/auth/logout      GET /api/auth/me
     GET    /api/health
     POST   /api/uploads                      multipart file  -> {video_key, ...}
-    POST   /api/jobs                         {video_key, prompt, language, platform, num_clips}
+    POST   /api/jobs                         {video_key, prompt, language, platform, num_clips, quality, captions}
     GET    /api/jobs/{id}                    status + clips
-    GET    /api/jobs                         past jobs
+    GET    /api/jobs                         your past jobs
     DELETE /api/jobs/{id}
-    GET    /api/jobs/{id}/clips/{n}/video    stream a finished clip
-    GET    /api/jobs/{id}/clips/{n}/download download a finished clip
+    GET    /api/jobs/{id}/clips/{n}/video    stream a finished clip (only when not on Cloudinary)
+    GET    /api/jobs/{id}/clips/{n}/download
 
 Job states: uploaded -> transcribing -> finding_moments -> rendering -> done | failed
 """
@@ -26,44 +27,22 @@ import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Literal
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
-from typing import Literal
-
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-import cloudinary
-import cloudinary.uploader
-
-from pricing import estimate_cost, usd_to_inr
-
-import cloudinary
-import cloudinary.uploader
-
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-    secure=True,
-)
 
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
 
-CLOUDINARY_CONFIGURED = all(os.getenv(name) for name in (
-    "CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"))
-CLOUDINARY_STORE_ORIGINALS = os.getenv("CLOUDINARY_STORE_ORIGINALS", "0") == "1"
-if CLOUDINARY_CONFIGURED:
-    cloudinary.config(
-        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-        api_key=os.getenv("CLOUDINARY_API_KEY"),
-        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-        secure=True,
-    )
+import auth                                        # noqa: E402  (needs .env loaded first)
+from pricing import estimate_cost, usd_to_inr      # noqa: E402
 
 # ---------------- settings ----------------
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE / "data")))
@@ -72,6 +51,7 @@ JOBS_DIR = DATA_DIR / "jobs"
 DB_PATH = DATA_DIR / "smartix.db"
 SCRIPTS_DIR = Path(os.getenv("SCRIPTS_DIR", str(BASE)))   # where transcribe/find_moments/render live
 FONTS_SRC = Path(os.getenv("FONTS_SRC", str(BASE / "fonts")))
+WEB_DIST = Path(os.getenv("WEB_DIST", str(BASE / "web" / "dist")))   # output of `npm run build`
 
 MAX_UPLOAD_BYTES = int(float(os.getenv("MAX_UPLOAD_GB", "2")) * 1024 ** 3)
 MAX_VIDEO_MINUTES = float(os.getenv("MAX_VIDEO_MINUTES", "30"))
@@ -80,7 +60,24 @@ STAGE_TIMEOUT_SECS = int(os.getenv("STAGE_TIMEOUT_SECS", "1200"))
 UPLOAD_TTL_DAYS = float(os.getenv("UPLOAD_TTL_DAYS", "3"))     # originals are deleted after this
 MIN_CLIP_SECS = os.getenv("MIN_CLIP_SECS", "20")
 MAX_CLIP_SECS = os.getenv("MAX_CLIP_SECS", "60")
-CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+JOBS_PER_DAY = int(os.getenv("JOBS_PER_DAY", "20"))            # per user, protects your API bill
+MAX_RUNNING_PER_USER = int(os.getenv("MAX_RUNNING_PER_USER", "2"))
+# Only needed if the browser talks to the API from a different address (not the case with the
+# Vite proxy or the built app). Use real origins, e.g. https://smartixcut.com, never *.
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip() and o.strip() != "*"]
+
+# Cloudinary stores the finished clips (and optionally originals) so your server disk stays small.
+CLOUD_VARS = ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET")
+CLOUD_ON = all(os.getenv(v) for v in CLOUD_VARS)
+CLOUD_STORE_ORIGINALS = os.getenv("CLOUDINARY_STORE_ORIGINALS", "0") == "1"
+if CLOUD_ON:
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        cloudinary.config(cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"), api_key=os.getenv("CLOUDINARY_API_KEY"),
+                          api_secret=os.getenv("CLOUDINARY_API_SECRET"), secure=True)
+    except ImportError:
+        cloudinary = None
 
 ALLOWED_EXT = {".mp4", ".mov", ".m4v"}
 LANGUAGES = {"ta", "hi", "mr", "en"}
@@ -100,18 +97,6 @@ STAGE_ERRORS = {
 executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_JOBS)
 
 
-def upload_video_to_cloudinary(path, folder):
-    if not CLOUDINARY_CONFIGURED:
-        return None
-    return cloudinary.uploader.upload_large(
-        str(path),
-        resource_type="video",
-        folder=folder,
-        use_filename=False,
-        unique_filename=True,
-    )
-
-
 # ---------------- database ----------------
 @contextmanager
 def db():
@@ -125,6 +110,7 @@ def db():
 
 
 def init_storage():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     with db() as c:
@@ -137,13 +123,19 @@ def init_storage():
                 video_key TEXT, video_name TEXT, video_path TEXT,
                 prompt TEXT, language TEXT, platform TEXT, num_clips INTEGER,
                 audio_seconds REAL, total_seconds REAL,
-                stage_seconds TEXT, clips TEXT, cost_usd REAL
+                stage_seconds TEXT, clips TEXT, cost_usd REAL,
+                user_id TEXT
             )""")
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
+        if "user_id" not in cols:                       # database made before accounts existed
+            c.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs (user_id, created_at)")
         # a restart kills running jobs: mark them failed instead of leaving them stuck
         c.execute(
             "UPDATE jobs SET status='failed', updated_at=?, error=? WHERE status IN (?,?,?,?)",
             (time.time(), "The server restarted while this job was running. Please try again.")
             + RUNNING_STATES)
+    auth.setup(db, DATA_DIR)
 
 
 def cleanup_old_uploads():
@@ -173,11 +165,12 @@ def update_job(job_id, **fields):
         c.execute("UPDATE jobs SET " + ", ".join(sets) + " WHERE id=?", vals)
 
 
-def get_row(job_id):
+def get_row(job_id, user):
+    """The job, but only if it belongs to this user. Anyone else gets a plain 404."""
     if not ID_RE.match(job_id):
         raise HTTPException(404, "Job not found")
     with db() as c:
-        row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = c.execute("SELECT * FROM jobs WHERE id=? AND user_id=?", (job_id, user["id"])).fetchone()
     if not row:
         raise HTTPException(404, "Job not found")
     return row
@@ -186,14 +179,18 @@ def get_row(job_id):
 def job_public(row):
     clips = json.loads(row["clips"] or "[]")
     for c in clips:
+        base = "/api/jobs/{}/clips/{}".format(row["id"], c["n"])
         if c.get("cloudinary_url"):
-            c["video_url"] = c["cloudinary_url"]
-            c["download_url"] = c["cloudinary_url"]
+            c["video_url"] = c["download_url"] = c["cloudinary_url"]
         else:
-            base = "/api/jobs/{}/clips/{}".format(row["id"], c["n"])
-            c["video_url"] = base + "/video"
-            c["download_url"] = base + "/download"
+            c["video_url"], c["download_url"] = base + "/video", base + "/download"
+        c.pop("cloudinary_url", None)
+        c.pop("cloudinary_id", None)
     cost = row["cost_usd"]
+    try:                                               # the quality + caption style this job was made with
+        options = json.loads((JOBS_DIR / row["id"] / "options.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        options = None
     return {
         "id": row["id"],
         "status": row["status"],
@@ -213,8 +210,22 @@ def job_public(row):
         "error_detail": row["error_detail"],
         "cost_usd": cost,
         "cost_inr": round(cost * usd_to_inr(), 2) if cost is not None else None,
+        "options": options,
         "clips": clips,
     }
+
+
+# ---------------- cloudinary ----------------
+def cloud_upload(path, folder, public_id):
+    """Upload one video file. Returns (https url, cloudinary public id)."""
+    r = cloudinary.uploader.upload_large(
+        str(path), resource_type="video", folder=folder, public_id=public_id,
+        overwrite=True, use_filename=False, unique_filename=False)
+    return r["secure_url"], r["public_id"]
+
+
+def cloud_delete(public_id):
+    cloudinary.uploader.destroy(public_id, resource_type="video", invalidate=True)
 
 
 # ---------------- the pipeline job ----------------
@@ -251,7 +262,7 @@ def run_job(job_id):
         stages = [
             ("transcribing", ["transcribe_chunked.py", video, row["language"]]),
             ("finding_moments", ["find_moments.py"]),
-            ("rendering", ["render.py", video]),
+            ("rendering", ["render.py", video]),          # render.py reads options.json in the job folder
         ]
 
         for status, args in stages:
@@ -283,34 +294,35 @@ def run_job(job_id):
         # ---- success: collect the clips and the cost ----
         result = json.loads((jdir / "result.json").read_text(encoding="utf-8"))
         picked = json.loads((jdir / "clips.json").read_text(encoding="utf-8"))
-        rendered = []
+        clips = []
         for c in picked.get("clips", []):
             n = c["rank"]
-            rendered_path = jdir / "clips_out" / "clip_{}.mp4".format(n)
-            if rendered_path.exists():
-                rendered.append((c, rendered_path))
-
-        def upload_rendered(item):
-            clip, path = item
-            result = upload_video_to_cloudinary(
-                path, "smartixcut/jobs/{}".format(job_id))
-            return clip, result
-
-        with ThreadPoolExecutor(max_workers=min(4, len(rendered) or 1)) as pool:
-            uploaded = list(pool.map(upload_rendered, rendered))
-
-        clips = []
-        for c, cloudinary_result in uploaded:
-            clips.append({"n": c["rank"], "title": c.get("title", ""), "reason": c.get("reason", ""),
+            if (jdir / "clips_out" / "clip_{}.mp4".format(n)).exists():
+                clips.append({"n": n, "title": c.get("title", ""), "reason": c.get("reason", ""),
                               "hashtags": c.get("hashtags", []), "start": c["start"], "end": c["end"],
-                              "duration": c["duration"], "text": c.get("text", ""),
-                              "cloudinary_url": cloudinary_result.get("secure_url") if cloudinary_result else None,
-                              "cloudinary_public_id": cloudinary_result.get("public_id") if cloudinary_result else None})
+                              "duration": c["duration"], "text": c.get("text", "")})
         if not clips:
             update_job(job_id, status="failed", error=STAGE_ERRORS["rendering"],
                        error_detail=log_tail(log_path), stage_seconds=stage_secs,
                        total_seconds=round(time.time() - t_start, 1))
             return
+
+        if CLOUD_ON and cloudinary is not None:        # push the clips to Cloudinary, all at once
+            t = time.time()
+
+            def push(c):
+                local = jdir / "clips_out" / "clip_{}.mp4".format(c["n"])
+                try:
+                    c["cloudinary_url"], c["cloudinary_id"] = cloud_upload(
+                        local, "smartixcut/clips/" + job_id, "clip_{}".format(c["n"]))
+                    local.unlink(missing_ok=True)          # keep the server disk small
+                except Exception as e:                     # clip stays on disk and is served from there
+                    with open(log_path, "a", encoding="utf-8") as log:
+                        log.write("\nCloudinary upload failed for clip {}: {}\n".format(c["n"], str(e)[:300]))
+
+            with ThreadPoolExecutor(max_workers=min(4, len(clips))) as pool:
+                list(pool.map(push, clips))
+            stage_secs["cloud_upload"] = round(time.time() - t, 1)
 
         cost = estimate_cost(
             result.get("stt_model", "whisper-large-v3"),
@@ -329,9 +341,10 @@ def run_job(job_id):
 
 # ---------------- app ----------------
 app = FastAPI(title="SmartixCut API")
-app.add_middleware(
-    CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"],
-    allow_credentials=("*" not in CORS_ORIGINS))
+if CORS_ORIGINS:
+    app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"],
+                       allow_headers=["*"], allow_credentials=True)
+app.include_router(auth.router)
 
 
 @app.on_event("startup")
@@ -343,14 +356,6 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     executor.shutdown(wait=False, cancel_futures=True)
-
-
-@app.get("/", include_in_schema=False)
-def home():
-    page = BASE / "index.html"
-    if not page.exists():
-        raise HTTPException(404, "index.html is missing next to api.py")
-    return FileResponse(page, media_type="text/html")
 
 
 @app.get("/api/health")
@@ -366,8 +371,14 @@ def health():
     for s in ("transcribe_chunked.py", "find_moments.py", "render.py"):
         if not (SCRIPTS_DIR / s).exists():
             problems.append("{} not found in {}".format(s, SCRIPTS_DIR))
+    some = [v for v in CLOUD_VARS if os.getenv(v)]
+    if some and not CLOUD_ON:
+        problems.append("Cloudinary is half set up: missing " + ", ".join(v for v in CLOUD_VARS if not os.getenv(v)))
+    if CLOUD_ON and cloudinary is None:
+        problems.append("Cloudinary is configured but not installed: run  pip install cloudinary")
     return {"ok": not problems, "problems": problems,
             "languages": sorted(LANGUAGES), "platforms": PLATFORMS,
+            "storage": "cloudinary" if CLOUD_ON else "local",
             "max_upload_gb": MAX_UPLOAD_BYTES / 1024 ** 3,
             "max_video_minutes": MAX_VIDEO_MINUTES}
 
@@ -390,7 +401,7 @@ def probe_video(path):
 
 
 @app.post("/api/uploads", status_code=201)
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), user: dict = Depends(auth.current_user)):
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
@@ -424,24 +435,14 @@ async def upload(file: UploadFile = File(...)):
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "Videos can be up to {:g} minutes long for now.".format(MAX_VIDEO_MINUTES))
 
-    cloudinary_result = None
-    if CLOUDINARY_CONFIGURED and CLOUDINARY_STORE_ORIGINALS:
+    meta = {"name": file.filename, "duration": round(info, 1), "size": size, "ext": ext}
+    if CLOUD_ON and cloudinary is not None and CLOUD_STORE_ORIGINALS:     # optional backup copy
         try:
-            cloudinary_result = upload_video_to_cloudinary(dest, "smartixcut/uploads")
+            meta["cloudinary_url"], _ = cloud_upload(dest, "smartixcut/uploads/" + user["id"], key)
         except Exception:
-            dest.unlink(missing_ok=True)
-            raise HTTPException(502, "Video storage upload failed. Check your Cloudinary settings and try again.")
-
-    meta = {
-        "name": file.filename,
-        "duration": round(info, 1),
-        "size": size,
-        "ext": ext,
-        "cloudinary_url": cloudinary_result.get("secure_url") if cloudinary_result else None,
-        "cloudinary_public_id": cloudinary_result.get("public_id") if cloudinary_result else None,
-    }
-    (UPLOAD_DIR / (key + ".json")).write_text(json.dumps(meta), encoding="utf-8")
-    return {"video_key": key, **meta}
+            pass
+    (UPLOAD_DIR / (key + ".json")).write_text(json.dumps({**meta, "user_id": user["id"]}), encoding="utf-8")
+    return {"video_key": key, **{k: v for k, v in meta.items() if k != "cloudinary_url"}}
 
 
 class CaptionOpts(BaseModel):
@@ -465,63 +466,83 @@ class JobIn(BaseModel):
 
 
 @app.post("/api/jobs", status_code=201)
-def create_job(body: JobIn):
+def create_job(body: JobIn, user: dict = Depends(auth.current_user)):
     if body.language not in LANGUAGES:
         raise HTTPException(422, "Language must be one of: " + ", ".join(sorted(LANGUAGES)))
     if body.platform not in PLATFORMS:
         raise HTTPException(422, "Platform must be one of: " + ", ".join(PLATFORMS))
 
+    gone = "That upload was not found (it may have expired). Please upload the video again."
     meta_file = UPLOAD_DIR / (body.video_key + ".json")
     if not meta_file.exists():
-        raise HTTPException(404, "That upload was not found (it may have expired). Please upload the video again.")
+        raise HTTPException(404, gone)
     meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    if meta.get("user_id") != user["id"]:             # somebody else's upload
+        raise HTTPException(404, gone)
     video_path = UPLOAD_DIR / (body.video_key + meta["ext"])
     if not video_path.exists():
-        raise HTTPException(404, "That upload was not found (it may have expired). Please upload the video again.")
+        raise HTTPException(404, gone)
+
+    now = time.time()
+    with db() as c:
+        today = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND created_at>?",
+                          (user["id"], now - 86400)).fetchone()[0]
+        running = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND status IN (?,?,?,?)",
+                            (user["id"],) + RUNNING_STATES).fetchone()[0]
+    if today >= JOBS_PER_DAY:
+        raise HTTPException(429, "You've reached today's limit of {} videos. Try again tomorrow.".format(JOBS_PER_DAY))
+    if running >= MAX_RUNNING_PER_USER:
+        raise HTTPException(429, "You already have {} videos processing. Wait for one to finish.".format(running))
 
     job_id = uuid.uuid4().hex
-    now = time.time()
     with db() as c:
         c.execute(
             """INSERT INTO jobs (id, created_at, updated_at, status, video_key, video_name, video_path,
-                                 prompt, language, platform, num_clips)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                 prompt, language, platform, num_clips, user_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, now, now, "uploaded", body.video_key, meta["name"], str(video_path),
-             body.prompt.strip(), body.language, body.platform, body.num_clips))
+             body.prompt.strip(), body.language, body.platform, body.num_clips, user["id"]))
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "options.json").write_text(
-        json.dumps({"quality": body.quality, "captions": body.captions.model_dump()}),
-        encoding="utf-8")
+        json.dumps({"quality": body.quality, "captions": body.captions.model_dump()}), encoding="utf-8")
     executor.submit(run_job, job_id)
     return {"job_id": job_id, "status": "uploaded"}
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
-    return job_public(get_row(job_id))
+def get_job(job_id: str, user: dict = Depends(auth.current_user)):
+    return job_public(get_row(job_id, user))
 
 
 @app.get("/api/jobs")
-def list_jobs(limit: int = Query(20, ge=1, le=100)):
+def list_jobs(limit: int = Query(20, ge=1, le=100), user: dict = Depends(auth.current_user)):
     with db() as c:
-        rows = c.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        rows = c.execute("SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                         (user["id"], limit)).fetchall()
     return {"jobs": [job_public(r) for r in rows]}
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: str):
-    row = get_row(job_id)
+def delete_job(job_id: str, user: dict = Depends(auth.current_user)):
+    row = get_row(job_id, user)
     if row["status"] in RUNNING_STATES:
         raise HTTPException(409, "This job is still running.")
+    if CLOUD_ON and cloudinary is not None:           # free the Cloudinary storage too
+        for c in json.loads(row["clips"] or "[]"):
+            if c.get("cloudinary_id"):
+                try:
+                    cloud_delete(c["cloudinary_id"])
+                except Exception:
+                    pass
     shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
     with db() as c:
         c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
     return {"deleted": job_id}
 
 
-def clip_path(job_id, n):
-    row = get_row(job_id)
+def clip_path(job_id, n, user):
+    row = get_row(job_id, user)
     path = JOBS_DIR / row["id"] / "clips_out" / "clip_{}.mp4".format(int(n))
     if not path.exists():
         raise HTTPException(404, "Clip not found")
@@ -529,11 +550,31 @@ def clip_path(job_id, n):
 
 
 @app.get("/api/jobs/{job_id}/clips/{n}/video")
-def clip_video(job_id: str, n: int):
-    return FileResponse(clip_path(job_id, n), media_type="video/mp4")
+def clip_video(job_id: str, n: int, user: dict = Depends(auth.current_user)):
+    return FileResponse(clip_path(job_id, n, user), media_type="video/mp4")
 
 
 @app.get("/api/jobs/{job_id}/clips/{n}/download")
-def clip_download(job_id: str, n: int):
-    return FileResponse(clip_path(job_id, n), media_type="video/mp4",
+def clip_download(job_id: str, n: int, user: dict = Depends(auth.current_user)):
+    return FileResponse(clip_path(job_id, n, user), media_type="video/mp4",
                         filename="smartixcut_clip_{}.mp4".format(n))
+
+
+# ---------------- the React app (built files), registered last so /api wins ----------------
+if (WEB_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def web_app(path: str):
+    if path.startswith("api/"):
+        raise HTTPException(404, "Not found")
+    index = WEB_DIST / "index.html"
+    if not index.exists():
+        return HTMLResponse(
+            "<h2>SmartixCut API is running</h2><p>The web app isn't built yet. In the <code>web</code> folder run "
+            "<code>npm run build</code>, or use <code>npm run dev</code> and open http://localhost:5173</p>")
+    f = (WEB_DIST / path).resolve()
+    if path and f.is_file() and WEB_DIST.resolve() in f.parents:      # favicon etc.
+        return FileResponse(f)
+    return FileResponse(index)                                        # any app route: let React decide
