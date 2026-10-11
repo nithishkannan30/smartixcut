@@ -24,11 +24,9 @@ import json
 import time
 import uuid
 import shutil
-import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Literal
-from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -42,13 +40,14 @@ BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
 
 import auth                                        # noqa: E402  (needs .env loaded first)
+import database                                    # noqa: E402
+from database import db                            # noqa: E402
 from pricing import estimate_cost, usd_to_inr      # noqa: E402
 
 # ---------------- settings ----------------
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE / "data")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 JOBS_DIR = DATA_DIR / "jobs"
-DB_PATH = DATA_DIR / "smartix.db"
 SCRIPTS_DIR = Path(os.getenv("SCRIPTS_DIR", str(BASE)))   # where transcribe/find_moments/render live
 FONTS_SRC = Path(os.getenv("FONTS_SRC", str(BASE / "fonts")))
 WEB_DIST = Path(os.getenv("WEB_DIST", str(BASE / "web" / "dist")))   # output of `npm run build`
@@ -98,37 +97,34 @@ executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_JOBS)
 
 
 # ---------------- database ----------------
-@contextmanager
-def db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+# db() comes from database.py: Postgres when DATABASE_URL is set, otherwise a local SQLite file.
 
 
 def init_storage():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    database.init(DATA_DIR)
     with db() as c:
-        c.execute("PRAGMA journal_mode=WAL")
+        if not database.USE_PG:
+            c.execute("PRAGMA journal_mode=WAL")
         c.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
-                created_at REAL, updated_at REAL,
+                created_at DOUBLE PRECISION, updated_at DOUBLE PRECISION,
                 status TEXT, error TEXT, error_detail TEXT,
                 video_key TEXT, video_name TEXT, video_path TEXT,
                 prompt TEXT, language TEXT, platform TEXT, num_clips INTEGER,
-                audio_seconds REAL, total_seconds REAL,
-                stage_seconds TEXT, clips TEXT, cost_usd REAL,
+                audio_seconds DOUBLE PRECISION, total_seconds DOUBLE PRECISION,
+                stage_seconds TEXT, clips TEXT, cost_usd DOUBLE PRECISION,
                 user_id TEXT
             )""")
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
-        if "user_id" not in cols:                       # database made before accounts existed
-            c.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
+        if database.USE_PG:
+            c.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_id TEXT")
+        else:
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(jobs)")}
+            if "user_id" not in cols:                   # database made before accounts existed
+                c.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs (user_id, created_at)")
         # a restart kills running jobs: mark them failed instead of leaving them stuck
         c.execute(
@@ -356,6 +352,7 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     executor.shutdown(wait=False, cancel_futures=True)
+    database.close()
 
 
 @app.get("/api/health")
@@ -379,6 +376,7 @@ def health():
     return {"ok": not problems, "problems": problems,
             "languages": sorted(LANGUAGES), "platforms": PLATFORMS,
             "storage": "cloudinary" if CLOUD_ON else "local",
+            "database": "postgres" if database.USE_PG else "sqlite",
             "max_upload_gb": MAX_UPLOAD_BYTES / 1024 ** 3,
             "max_video_minutes": MAX_VIDEO_MINUTES}
 

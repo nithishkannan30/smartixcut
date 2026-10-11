@@ -10,7 +10,8 @@ How it works (the plain-English version):
 
 Settings (.env):
     SECRET_KEY      long random string that signs the login cookie. If you don't set it, one is
-                    generated and saved in data/.secret (fine for your laptop, set it on a server).
+                    generated and saved (in the cloud database if DATABASE_URL is set, else in
+                    data/.secret). Still best to set it yourself on a server.
     SESSION_DAYS    how long a login lasts (default 14)
     COOKIE_SECURE   set to 1 once the site runs on https
 """
@@ -22,12 +23,13 @@ import hmac
 import base64
 import hashlib
 import secrets
-import sqlite3
 from pathlib import Path
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+
+import database
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -52,20 +54,29 @@ def setup(db_ctx, data_dir):
                 email TEXT UNIQUE NOT NULL,
                 name TEXT NOT NULL,
                 pw_hash TEXT NOT NULL,
-                created_at REAL NOT NULL
+                created_at DOUBLE PRECISION NOT NULL
             )""")
     _secret = os.getenv("SECRET_KEY", "").strip()
-    if not _secret:
-        f = Path(data_dir) / ".secret"
-        if f.exists():
-            _secret = f.read_text(encoding="utf-8").strip()
-        else:
-            _secret = secrets.token_hex(32)
-            f.write_text(_secret, encoding="utf-8")
-            try:
-                f.chmod(0o600)
-            except OSError:
-                pass
+    if _secret:
+        return
+    if database.USE_PG:
+        # cloud servers lose local files on restart, so keep the signing key in the database instead
+        with _db() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS app_secret (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            c.execute("INSERT INTO app_secret (id, value) VALUES (1, ?) ON CONFLICT (id) DO NOTHING",
+                      (secrets.token_hex(32),))
+            _secret = c.execute("SELECT value FROM app_secret WHERE id=1").fetchone()["value"]
+        return
+    f = Path(data_dir) / ".secret"
+    if f.exists():
+        _secret = f.read_text(encoding="utf-8").strip()
+    else:
+        _secret = secrets.token_hex(32)
+        f.write_text(_secret, encoding="utf-8")
+        try:
+            f.chmod(0o600)
+        except OSError:
+            pass
 
 
 # ---------------- passwords ----------------
@@ -172,7 +183,7 @@ def signup(body: SignupIn, request: Request, response: Response):
         with _db() as c:
             c.execute("INSERT INTO users (id, email, name, pw_hash, created_at) VALUES (?,?,?,?,?)",
                       (row["id"], email, name, hash_password(body.password), time.time()))
-    except sqlite3.IntegrityError:
+    except database.IntegrityErrors:
         raise HTTPException(409, "An account with this email already exists. Log in instead.")
     _note("signup|" + _ip(request))
     _set_cookie(response, row["id"])
