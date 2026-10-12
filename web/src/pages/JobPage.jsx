@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, post } from '../api'
+import ClipEditor from '../components/ClipEditor'
 import FailureCard from '../components/FailureCard'
 import Progress from '../components/Progress'
 import Results from '../components/Results'
 
-// One job. Polls the server every 1.5 s until it is done or failed.
+// One job. Polls the server every 1.5 s until it is done or failed (and again after a clip edit is saved).
 // Because the id is in the address, a refresh (or a link from "My clips") brings you right back.
 // `key={jobId}` gives every job a fresh component, so nothing from the previous job lingers.
 export default function JobPage() {
@@ -18,6 +19,9 @@ function JobView({ jobId }) {
   const [job, setJob] = useState(null)
   const [problem, setProblem] = useState('')
   const [retryError, setRetryError] = useState('')
+  const [editing, setEditing] = useState(null)      // number of the clip being edited
+  const [updated, setUpdated] = useState(null)      // the clip that was just re-rendered
+  const [tick, setTick] = useState(0)               // bump to start polling again after an edit is saved
 
   useEffect(() => {
     let stopped = false
@@ -37,7 +41,7 @@ function JobView({ jobId }) {
     }
     poll()
     return () => { stopped = true; clearTimeout(timer) }
-  }, [jobId])
+  }, [jobId, tick])
 
   async function retry() {
     setRetryError('')
@@ -53,11 +57,28 @@ function JobView({ jobId }) {
     }
   }
 
+  function editSaved() {                          // show progress at once, then keep polling
+    setUpdated(editing)
+    setEditing(null)
+    setJob((j) => ({ ...j, status: 'rendering', progress: 82 }))
+    setTick((t) => t + 1)
+  }
+
   if (problem) return <FailureCard message={problem} onNew={() => navigate('/')} />
   if (!job) return <div className="boot" role="status">Loading…</div>
-  if (job.status === 'done') return <Results job={job} onNew={() => navigate('/')} />
+  if (job.status === 'done') {
+    if (editing) {
+      return <ClipEditor jobId={jobId} clipN={editing} onSubmitted={editSaved} onCancel={() => setEditing(null)}
+        onNew={() => navigate('/')} />
+    }
+    return <Results job={job} onNew={() => navigate('/')} updated={updated}
+      onEdit={job.editable ? setEditing : undefined} />
+  }
   if (job.status === 'failed') {
     return <FailureCard message={retryError || job.error} detail={job.error_detail} onRetry={retry} onNew={() => navigate('/')} />
   }
-  return <Progress status={job.status} serverProgress={job.progress} startedAt={job.created_at * 1000} />
+  return (
+    <Progress status={job.status} serverProgress={job.progress} startedAt={job.created_at * 1000}
+      title={job.clips.length > 0 ? `Updating clip ${updated ?? ''}…` : undefined} />
+  )
 }

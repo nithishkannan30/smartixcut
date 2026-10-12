@@ -1,6 +1,6 @@
 import ClipCard from './ClipCard'
 
-export default function Results({ job, onNew }) {
+export default function Results({ job, onNew, onEdit, updated }) {
   const n = job.clips.length
   const dev = new URLSearchParams(window.location.search).has('dev')
   const stages = job.stage_seconds || {}
@@ -16,7 +16,7 @@ export default function Results({ job, onNew }) {
         <button className="btn" type="button" onClick={onNew}>New video</button>
       </div>
       <div className="clips">
-        {job.clips.map((c) => <ClipCard key={c.n} clip={c} />)}
+        {job.clips.map((c) => <ClipCard key={c.n} clip={c} onEdit={onEdit} updated={c.n === updated} />)}
       </div>
       {dev && (
         <div className="dev">

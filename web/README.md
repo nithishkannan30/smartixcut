@@ -40,3 +40,7 @@ Build it for real use (FastAPI then serves it at http://localhost:8000):
 - Route: an address that shows a page (`/login`, `/jobs/abc`).
 - Login: the server sets a cookie we can't read from JavaScript. The browser sends it back on
   every request by itself, so `api.js` needs no token code.
+
+## Caption editor
+
+Tick **Let me check the captions before the clips are made** in step 3 and the job pauses after the AI picks the moments. You fix the text (Tamil, Hindi, Marathi, English), play any line, then render. Finished clips have an **Edit captions** button that re-renders only that clip. The code is in `src/components/CaptionEditor.jsx`; the server side is `/api/jobs/{id}/review`, `/render` and `/source` in `api.py`.

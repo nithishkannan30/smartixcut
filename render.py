@@ -12,6 +12,10 @@ Optional: options.json (written by the web app) with the user's caption style an
      "captions": {"enabled": true, "style": "outline" | "box" | "karaoke",
                   "size": "small" | "medium" | "large", "position": "bottom" | "middle" | "top",
                   "color": "#FFFFFF", "highlight": "#FFE600", "uppercase": false}}
+Optional: edits.json (written by the clip editor):
+    {"lines": {"12": "fixed text", "13": ""},            # line number in result.json -> new text ("" removes it)
+     "clips": {"2": {"captions": {...same as above...}}}}   # caption style for one clip only
+Optional: environment variable RENDER_ONLY="1,3" renders just those clips (used when one clip is edited).
 Output: clips_out/clip_1.mp4, clip_2.mp4, ...
 """
 import os
@@ -27,6 +31,7 @@ VIDEO = sys.argv[1] if len(sys.argv) > 1 else "video.mp4"
 CLIPS_FILE = "clips.json"
 RESULT_FILE = "result.json"
 OPTIONS_FILE = "options.json"
+EDITS_FILE = "edits.json"
 FONTS_DIR = "fonts"
 WORK_DIR = "work"
 OUT_DIR = "clips_out"
@@ -63,8 +68,14 @@ def load_options():
                 raw = json.load(f)
         except (OSError, ValueError):
             raw = {}
+    quality = raw.get("quality") if raw.get("quality") in QUALITY else "hd"
+    return quality, clean_caps(raw.get("captions"))
+
+
+def clean_caps(given):
+    """Caption options with safe defaults for anything missing or invalid."""
     cap = dict(DEFAULT_CAPTIONS)
-    given = raw.get("captions") if isinstance(raw.get("captions"), dict) else {}
+    given = given if isinstance(given, dict) else {}
     for k, default in DEFAULT_CAPTIONS.items():
         v = given.get(k, default)
         if k in ("color", "highlight"):
@@ -78,8 +89,58 @@ def load_options():
         cap["size"] = "medium"
     if cap["position"] not in ("bottom", "middle", "top"):
         cap["position"] = "bottom"
-    quality = raw.get("quality") if raw.get("quality") in QUALITY else "hd"
-    return quality, cap
+    return cap
+
+
+def load_clip_styles():
+    """Per-clip caption styles from the editor: {clip number: caption options}."""
+    try:
+        with open(EDITS_FILE, encoding="utf-8") as f:
+            raw = json.load(f).get("clips", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {int(k): clean_caps(v.get("captions")) for k, v in raw.items()
+            if str(k).isdigit() and isinstance(v, dict) and isinstance(v.get("captions"), dict)}
+
+
+def load_edits():
+    """The user's corrections: {line number: new text}. Missing or broken file = no corrections."""
+    try:
+        with open(EDITS_FILE, encoding="utf-8") as f:
+            raw = json.load(f).get("lines", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = str(v)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def apply_edits(lines, edits):
+    """Same lines, with the user's text swapped in. Edited lines are marked so karaoke knows."""
+    out = []
+    for i, l in enumerate(lines):
+        if i in edits and edits[i].strip() != l["text"].strip():
+            l = dict(l, text=edits[i].strip(), edited=True)
+        out.append(l)
+    return out
+
+
+def synth_words(line):
+    """Word timing for a line the user retyped: spread the line's time over the new words by length."""
+    toks = line["text"].split()
+    if not toks:
+        return []
+    total = float(sum(len(t) + 1 for t in toks))
+    t0, dur, out = line["start"], line["end"] - line["start"], []
+    for tok in toks:
+        d = (len(tok) + 1) / total * dur
+        out.append({"word": tok, "start": t0, "end": t0 + d})
+        t0 += d
+    return out
 
 
 def ass_color(hex_rgb, alpha=0):
@@ -201,11 +262,11 @@ def build_ass(lines, words, clip_start, clip_end, language, cap, path):
         s_abs = max(l["start"], clip_start)
         s = s_abs - clip_start
         e = min(l["end"], clip_end) - clip_start
-        if e - s < 0.15:
+        if e - s < 0.15 or not l["text"].strip():          # too short to read, or removed by the user
             continue
         text = None
         if cap["style"] == "karaoke":
-            text = karaoke_text(l, words, s_abs, main_font, cap["uppercase"])
+            text = karaoke_text(l, synth_words(l) if l.get("edited") else words, s_abs, main_font, cap["uppercase"])
         if text is None:
             plain = l["text"].upper() if cap["uppercase"] else l["text"]
             text = tag_runs(plain, main_font)
@@ -255,13 +316,19 @@ def main():
 
     with open(CLIPS_FILE, encoding="utf-8") as f:
         clips = json.load(f)["clips"]
+    only = {x for x in os.getenv("RENDER_ONLY", "").replace(" ", "").split(",") if x}
+    if only:
+        clips = [c for c in clips if str(c["rank"]) in only]
+        if not clips:
+            raise SystemExit("RENDER_ONLY matched no clips")
     with open(RESULT_FILE, encoding="utf-8") as f:
         result = json.load(f)
-    lines = result["lines"]
+    lines = apply_edits(result["lines"], load_edits())
     words = result.get("words", [])
     language = result.get("language", "ta")
 
     quality, cap = load_options()
+    styles = load_clip_styles()
     out_h, crf = QUALITY[quality]
     out_w = out_h * 9 // 16 // 2 * 2
     print("Quality: {} ({}x{}) | captions: {}".format(
@@ -273,7 +340,7 @@ def main():
     workers = max(1, min(RENDER_WORKERS, len(clips)))
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(lambda c: render_one(c, lines, words, language, cap, out_w, out_h, crf), clips))
+        list(pool.map(lambda c: render_one(c, lines, words, language, styles.get(c["rank"], cap), out_w, out_h, crf), clips))
 
     print("\nRendered {} clip(s) at {}x{} in {:.1f}s ({} parallel). Open the {} folder.".format(
         len(clips), out_w, out_h, time.time() - t0, workers, OUT_DIR))

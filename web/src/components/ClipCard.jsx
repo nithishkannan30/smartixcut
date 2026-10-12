@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { attachmentUrl, fmtTime } from '../format'
 
-export default function ClipCard({ clip }) {
+export default function ClipCard({ clip, onEdit, updated }) {
   const [copied, setCopied] = useState(false)
   const caption = clip.title + (clip.hashtags?.length ? `\n${clip.hashtags.join(' ')}` : '')
 
@@ -21,6 +21,7 @@ export default function ClipCard({ clip }) {
       <div className="body">
         <div>
           <span className="pill">Clip {clip.n}</span>{' '}
+          {updated && <span className="pill ok">Updated</span>}{' '}
           <span className="muted">{fmtTime(clip.duration)} from {fmtTime(clip.start)}</span>
         </div>
         <h3>{clip.title || 'Untitled clip'}</h3>
@@ -33,6 +34,9 @@ export default function ClipCard({ clip }) {
           <a className="btn small" href={attachmentUrl(clip.download_url || clip.video_url, clip.n)}
             download={`smartixcut_clip_${clip.n}.mp4`}>Download</a>
           <button className="btn small" type="button" onClick={copy}>{copied ? 'Copied' : 'Copy caption'}</button>
+          {onEdit && (
+            <button className="btn small" type="button" onClick={() => onEdit(clip.n)}>Edit</button>
+          )}
         </div>
       </div>
     </article>

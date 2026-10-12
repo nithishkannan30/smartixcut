@@ -26,7 +26,7 @@ import uuid
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import List, Literal, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
@@ -84,6 +84,7 @@ PLATFORMS = {"reels": "Instagram Reels", "shorts": "YouTube Shorts", "tiktok": "
 RUNNING_STATES = ("uploaded", "transcribing", "finding_moments", "rendering")
 STATUS_PROGRESS = {"uploaded": 5, "transcribing": 20, "finding_moments": 70,
                    "rendering": 82, "done": 100, "failed": 100}
+SOURCE_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime"}
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
@@ -172,6 +173,22 @@ def get_row(job_id, user):
     return row
 
 
+def read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def can_edit(row):
+    """A finished clip can be edited (trim, captions, style) as long as the transcript and the
+    original video are still on the server."""
+    if row["status"] != "done":
+        return False
+    jdir = JOBS_DIR / row["id"]
+    return (jdir / "result.json").exists() and (jdir / "clips.json").exists() and Path(row["video_path"]).exists()
+
+
 def job_public(row):
     clips = json.loads(row["clips"] or "[]")
     for c in clips:
@@ -179,7 +196,8 @@ def job_public(row):
         if c.get("cloudinary_url"):
             c["video_url"] = c["download_url"] = c["cloudinary_url"]
         else:
-            c["video_url"], c["download_url"] = base + "/video", base + "/download"
+            v = "?v={}".format(int(row["updated_at"] or 0))          # a re-render must not show the cached old video
+            c["video_url"], c["download_url"] = base + "/video" + v, base + "/download" + v
         c.pop("cloudinary_url", None)
         c.pop("cloudinary_id", None)
     cost = row["cost_usd"]
@@ -207,6 +225,7 @@ def job_public(row):
         "cost_usd": cost,
         "cost_inr": round(cost * usd_to_inr(), 2) if cost is not None else None,
         "options": options,
+        "editable": can_edit(row),
         "clips": clips,
     }
 
@@ -232,78 +251,148 @@ def log_tail(path, chars=600):
         return ""
 
 
+def echo_stage_log(job_id, status, secs, log_path, start):
+    """Copy what the stage printed into the server's own log (Render -> Logs tab), with its timing."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        text = ""
+    print("[job {}] {} took {:.1f}s\n{}".format(job_id[:8], status, secs, text[-2500:]), flush=True)
+
+
+def job_env(row):
+    brief = (row["prompt"] or "").strip() or "the best hooks and most interesting moments"
+    env = os.environ.copy()
+    env.update({
+        "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",   # Tamil/Hindi text in pipes on Windows
+        "CLIP_PROMPT": "{} (format: {})".format(brief, PLATFORMS.get(row["platform"], "short vertical video")),
+        "NUM_CLIPS": str(row["num_clips"]),
+        "MIN_LEN": MIN_CLIP_SECS, "MAX_LEN": MAX_CLIP_SECS,
+    })
+    env.pop("RENDER_ONLY", None)
+    return env
+
+
+def run_stage(job_id, jdir, status, args, env, stage_secs):
+    """Run one pipeline script. True if it worked; otherwise the job is marked failed and this returns False."""
+    log_path = jdir / "job.log"
+    update_job(job_id, status=status)
+    t = time.time()
+    log_start = log_path.stat().st_size if log_path.exists() else 0
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write("\n===== {} =====\n".format(status))
+        log.flush()
+        try:
+            r = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / args[0])] + args[1:],
+                cwd=str(jdir), env=env, stdout=log, stderr=subprocess.STDOUT,
+                timeout=STAGE_TIMEOUT_SECS)
+            code = r.returncode
+        except subprocess.TimeoutExpired:
+            code = -1
+            log.write("\nTIMEOUT after {}s\n".format(STAGE_TIMEOUT_SECS))
+    stage_secs[status] = round(time.time() - t, 1)
+    echo_stage_log(job_id, status, stage_secs[status], log_path, log_start)
+
+    if code != 0:
+        tail = log_tail(log_path)
+        msg = STAGE_ERRORS[status]
+        if status == "finding_moments" and "No valid clips" in tail:
+            msg = "No good clips were found in this video. Try a longer video or a different brief."
+        update_job(job_id, status="failed", error=msg, error_detail=tail,
+                   stage_seconds=stage_secs, total_seconds=round(sum(stage_secs.values()), 1))
+        return False
+    return True
+
+
+def effective_lines(jdir):
+    """The transcript lines with the user's corrections (edits.json) applied. `orig` keeps the AI's text."""
+    result = read_json(jdir / "result.json", {}) or {}
+    edits = (read_json(jdir / "edits.json", {}) or {}).get("lines", {})
+    out = []
+    for i, l in enumerate(result.get("lines", [])):
+        out.append({"i": i, "start": l["start"], "end": l["end"], "orig": l["text"],
+                    "text": edits.get(str(i), l["text"]), "low_conf": bool(l.get("low_conf"))})
+    return out
+
+
+def lines_in_clip(lines, start, end):
+    return [l for l in lines if not (l["end"] <= start or l["start"] >= end)]   # same rule render.py uses
+
+
 def run_job(job_id):
-    t_start = time.time()
+    """Stage 1+2: listen and pick the moments. Then render."""
     with db() as c:
         row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     jdir = JOBS_DIR / job_id
     jdir.mkdir(parents=True, exist_ok=True)
-    log_path = jdir / "job.log"
     stage_secs = {}
-
     try:
         # the render step looks for ./fonts, so each job gets its own copy
         if FONTS_SRC.is_dir() and not (jdir / "fonts").exists():
             shutil.copytree(FONTS_SRC, jdir / "fonts")
-
-        brief = (row["prompt"] or "").strip() or "the best hooks and most interesting moments"
-        env = os.environ.copy()
-        env.update({
-            "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",   # Tamil/Hindi text in pipes on Windows
-            "CLIP_PROMPT": "{} (format: {})".format(brief, PLATFORMS.get(row["platform"], "short vertical video")),
-            "NUM_CLIPS": str(row["num_clips"]),
-            "MIN_LEN": MIN_CLIP_SECS, "MAX_LEN": MAX_CLIP_SECS,
-        })
-        video = row["video_path"]
-        stages = [
-            ("transcribing", ["transcribe_chunked.py", video, row["language"]]),
-            ("finding_moments", ["find_moments.py"]),
-            ("rendering", ["render.py", video]),          # render.py reads options.json in the job folder
-        ]
-
-        for status, args in stages:
-            update_job(job_id, status=status)
-            t = time.time()
-            with open(log_path, "a", encoding="utf-8") as log:
-                log.write("\n===== {} =====\n".format(status))
-                log.flush()
-                try:
-                    r = subprocess.run(
-                        [sys.executable, str(SCRIPTS_DIR / args[0])] + args[1:],
-                        cwd=str(jdir), env=env, stdout=log, stderr=subprocess.STDOUT,
-                        timeout=STAGE_TIMEOUT_SECS)
-                    code = r.returncode
-                except subprocess.TimeoutExpired:
-                    code = -1
-                    log.write("\nTIMEOUT after {}s\n".format(STAGE_TIMEOUT_SECS))
-            stage_secs[status] = round(time.time() - t, 1)
-
-            if code != 0:
-                tail = log_tail(log_path)
-                msg = STAGE_ERRORS[status]
-                if status == "finding_moments" and "No valid clips" in tail:
-                    msg = "No good clips were found in this video. Try a longer video or a different brief."
-                update_job(job_id, status="failed", error=msg, error_detail=tail,
-                           stage_seconds=stage_secs, total_seconds=round(time.time() - t_start, 1))
+        env, video = job_env(row), row["video_path"]
+        for status, args in (("transcribing", ["transcribe_chunked.py", video, row["language"]]),
+                             ("finding_moments", ["find_moments.py"])):
+            if not run_stage(job_id, jdir, status, args, env, stage_secs):
                 return
+    except Exception as e:   # anything unexpected must not leave the job stuck
+        update_job(job_id, status="failed", error="Something went wrong while processing this video.",
+                   error_detail=str(e)[:600], stage_seconds=stage_secs,
+                   total_seconds=round(sum(stage_secs.values()), 1))
+        return
+    finish_render(job_id)
+
+
+def finish_render(job_id, only=None):
+    """Stage 3: cut the clips with captions and store them. `only` = clip numbers to redo (None = all)."""
+    with db() as c:
+        row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    jdir = JOBS_DIR / job_id
+    log_path = jdir / "job.log"
+    stage_secs = json.loads(row["stage_seconds"] or "{}")
+
+    try:
+        env = job_env(row)
+        if only:
+            env["RENDER_ONLY"] = ",".join(str(n) for n in sorted(only))
+        # render.py reads options.json, edits.json, clips.json and result.json from the job folder
+        # a re-render of one clip is not a new "made in N seconds": keep the original timings
+        timings = {} if only else stage_secs
+        if not run_stage(job_id, jdir, "rendering", ["render.py", row["video_path"]], env, timings):
+            return
 
         # ---- success: collect the clips and the cost ----
-        result = json.loads((jdir / "result.json").read_text(encoding="utf-8"))
-        picked = json.loads((jdir / "clips.json").read_text(encoding="utf-8"))
-        clips = []
+        result = read_json(jdir / "result.json", {}) or {}
+        picked = read_json(jdir / "clips.json", {}) or {}
+        lines = effective_lines(jdir)
+        existing = {c["n"]: c for c in json.loads(row["clips"] or "[]")}
+        clips, fresh = [], []
         for c in picked.get("clips", []):
             n = c["rank"]
-            if (jdir / "clips_out" / "clip_{}.mp4".format(n)).exists():
-                clips.append({"n": n, "title": c.get("title", ""), "reason": c.get("reason", ""),
-                              "hashtags": c.get("hashtags", []), "start": c["start"], "end": c["end"],
-                              "duration": c["duration"], "text": c.get("text", "")})
+            local = jdir / "clips_out" / "clip_{}.mp4".format(n)
+            redo = (not only or n in only) and local.exists()
+            if not redo and n not in existing:
+                continue
+            e = dict(existing.get(n, {}))
+            e.update({"n": n, "title": c.get("title", ""), "reason": c.get("reason", ""),
+                      "hashtags": c.get("hashtags", []),
+                      "text": " ".join(l["text"] for l in lines_in_clip(lines, c["start"], c["end"]) if l["text"].strip())})
+            if redo:
+                for k in ("cloudinary_url", "cloudinary_id"):      # old copy is replaced below
+                    e.pop(k, None)
+                e.update({"start": c["start"], "end": c["end"], "duration": c["duration"]})
+                fresh.append(e)
+            clips.append(e)
         if not clips:
             update_job(job_id, status="failed", error=STAGE_ERRORS["rendering"],
                        error_detail=log_tail(log_path), stage_seconds=stage_secs,
-                       total_seconds=round(time.time() - t_start, 1))
+                       total_seconds=round(sum(stage_secs.values()), 1))
             return
 
-        if CLOUD_ON and cloudinary is not None:        # push the clips to Cloudinary, all at once
+        if CLOUD_ON and cloudinary is not None and fresh:    # push the new clips to Cloudinary, all at once
             t = time.time()
 
             def push(c):
@@ -316,23 +405,26 @@ def run_job(job_id):
                     with open(log_path, "a", encoding="utf-8") as log:
                         log.write("\nCloudinary upload failed for clip {}: {}\n".format(c["n"], str(e)[:300]))
 
-            with ThreadPoolExecutor(max_workers=min(4, len(clips))) as pool:
-                list(pool.map(push, clips))
-            stage_secs["cloud_upload"] = round(time.time() - t, 1)
+            with ThreadPoolExecutor(max_workers=min(4, len(fresh))) as pool:
+                list(pool.map(push, fresh))
+            if not only:
+                stage_secs["cloud_upload"] = round(time.time() - t, 1)
 
-        cost = estimate_cost(
-            result.get("stt_model", "whisper-large-v3"),
-            result.get("billed_audio_seconds", result.get("audio_seconds", 0)),
-            os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
-            picked.get("provider", "groq"), picked.get("usage", {}))
+        cost_usd = row["cost_usd"]
+        if not only:                                       # a re-render of one clip doesn't change the AI bill
+            cost_usd = estimate_cost(
+                result.get("stt_model", "whisper-large-v3"),
+                result.get("billed_audio_seconds", result.get("audio_seconds", 0)),
+                os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+                picked.get("provider", "groq"), picked.get("usage", {}))["total"]
         update_job(job_id, status="done", clips=clips, stage_seconds=stage_secs,
-                   audio_seconds=result.get("audio_seconds"), cost_usd=cost["total"],
-                   total_seconds=round(time.time() - t_start, 1), error=None)
+                   audio_seconds=result.get("audio_seconds"), cost_usd=cost_usd,
+                   total_seconds=row["total_seconds"] if only else round(sum(stage_secs.values()), 1), error=None)
 
     except Exception as e:   # anything unexpected must not leave the job stuck
         update_job(job_id, status="failed", error="Something went wrong while processing this video.",
                    error_detail=str(e)[:600], stage_seconds=stage_secs,
-                   total_seconds=round(time.time() - t_start, 1))
+                   total_seconds=round(sum(stage_secs.values()), 1))
 
 
 # ---------------- app ----------------
@@ -537,6 +629,168 @@ def delete_job(job_id: str, user: dict = Depends(auth.current_user)):
     with db() as c:
         c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
     return {"deleted": job_id}
+
+
+# ---------------- clip editor (Edit button on a finished clip) ----------------
+MIN_EDIT_SECS, MAX_EDIT_SECS = 3.0, 90.0
+EDIT_WINDOW_SECS = 30          # how far beyond the AI's cut the user may trim outwards
+
+
+def clean_text(text, limit=400):
+    """One tidy line: no control characters or line breaks, no doubled spaces."""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text or "")
+    return re.sub(r" {2,}", " ", text).strip()[:limit]
+
+
+def clean_tags(tags):
+    out = []
+    for t in tags:
+        t = "#" + re.sub(r"[\s#,]+", "", t or "")[:40]
+        if len(t) > 1 and t not in out:
+            out.append(t)
+    return out[:8]
+
+
+def editor_files(row):
+    """The transcript and the picked clips, or a clear error if the server no longer has them."""
+    jdir = JOBS_DIR / row["id"]
+    result, picked = read_json(jdir / "result.json"), read_json(jdir / "clips.json")
+    if not result or not picked or not Path(row["video_path"]).exists():
+        raise HTTPException(404, "Editing is no longer available for this video (the original is only kept for "
+                                 "{:g} days). Please upload it again.".format(UPLOAD_TTL_DAYS))
+    return jdir, result, picked
+
+
+def video_length(row, result):
+    meta = read_json(UPLOAD_DIR / (row["video_key"] + ".json"), {}) or {}
+    last = max([l["end"] for l in result.get("lines", [])] or [0])
+    return float(meta.get("duration") or result.get("audio_seconds") or last)
+
+
+def find_clip(picked, n):
+    for c in picked.get("clips", []):
+        if c["rank"] == n:
+            return c
+    raise HTTPException(404, "Clip not found")
+
+
+def caption_defaults(jdir):
+    options = read_json(jdir / "options.json", {}) or {}
+    return {**CaptionOpts().model_dump(), **(options.get("captions") or {})}
+
+
+@app.get("/api/jobs/{job_id}/clips/{n}/editor")
+def clip_editor(job_id: str, n: int, user: dict = Depends(auth.current_user)):
+    """Everything the editor needs for one clip: the cut, the transcript lines around it, the caption style."""
+    row = get_row(job_id, user)
+    if row["status"] != "done":
+        raise HTTPException(409, "This video is still being processed.")
+    jdir, result, picked = editor_files(row)
+    clip = find_clip(picked, n)
+    length = video_length(row, result)
+    base_start, base_end = clip.get("orig_start", clip["start"]), clip.get("orig_end", clip["end"])
+    lo, hi = max(0.0, base_start - EDIT_WINDOW_SECS), min(length, base_end + EDIT_WINDOW_SECS)
+    edits = read_json(jdir / "edits.json", {}) or {}
+    style = {**caption_defaults(jdir), **((edits.get("clips") or {}).get(str(n), {}).get("captions") or {})}
+    lines = [{"i": l["i"], "start": l["start"], "end": l["end"], "text": l["text"], "orig": l["orig"],
+              "low_conf": l["low_conf"]} for l in lines_in_clip(effective_lines(jdir), lo, hi)]
+    return {"language": row["language"], "quality": (read_json(jdir / "options.json", {}) or {}).get("quality", "hd"),
+            "length": length, "bounds": [lo, hi], "lines": lines, "captions": style,
+            "clip": {"n": n, "title": clip.get("title", ""), "hashtags": clip.get("hashtags", []),
+                     "start": clip["start"], "end": clip["end"], "orig_start": base_start, "orig_end": base_end}}
+
+
+class LineEdit(BaseModel):
+    i: int = Field(ge=0)
+    text: str = Field(max_length=400)
+
+
+class ClipEdit(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=300)
+    hashtags: Optional[List[str]] = Field(default=None, max_length=12)
+    start: Optional[float] = Field(default=None, ge=0)          # trim
+    end: Optional[float] = Field(default=None, ge=0)
+    captions: Optional[CaptionOpts] = None                      # caption style for this clip only
+    lines: List[LineEdit] = Field(default_factory=list, max_length=400)
+
+
+@app.post("/api/jobs/{job_id}/clips/{n}/edit")
+def edit_clip(job_id: str, n: int, body: ClipEdit, user: dict = Depends(auth.current_user)):
+    """Save the user's changes to one clip and render that clip again. The other clips are untouched."""
+    row = get_row(job_id, user)
+    if row["status"] != "done":
+        raise HTTPException(409, "This video is still being processed.")
+    jdir, result, picked = editor_files(row)
+    clip = find_clip(picked, n)
+    n_lines = len(result.get("lines", []))
+    edits = read_json(jdir / "edits.json", {}) or {}
+    line_edits, clip_edits = edits.get("lines", {}), edits.get("clips", {})
+
+    # -- trim (validated before anything is written) --
+    if body.start is not None or body.end is not None:
+        start = body.start if body.start is not None else clip["start"]
+        end = body.end if body.end is not None else clip["end"]
+        length = video_length(row, result)
+        end = min(end, length) if length else end
+        if not (MIN_EDIT_SECS <= end - start <= MAX_EDIT_SECS):
+            raise HTTPException(400, "A clip must be between {:g} and {:g} seconds long.".format(MIN_EDIT_SECS, MAX_EDIT_SECS))
+        if (start, end) != (clip["start"], clip["end"]):
+            clip.setdefault("orig_start", clip["start"])
+            clip.setdefault("orig_end", clip["end"])
+            clip["start"], clip["end"], clip["duration"] = round(start, 2), round(end, 2), round(end - start, 2)
+
+    # -- caption text --
+    original = result.get("lines", [])
+    for le in body.lines:
+        if le.i >= n_lines:
+            raise HTTPException(400, "Line {} does not exist.".format(le.i))
+        text = clean_text(le.text)
+        if text == original[le.i]["text"].strip():
+            line_edits.pop(str(le.i), None)                 # back to what the AI heard
+        else:
+            line_edits[str(le.i)] = text                    # "" means: remove this line
+
+    # -- caption style for this clip --
+    if body.captions is not None:
+        style = body.captions.model_dump()
+        if style == {**CaptionOpts().model_dump(), **caption_defaults(jdir)}:
+            clip_edits.pop(str(n), None)                    # same as the job's style: no override needed
+        else:
+            clip_edits[str(n)] = {"captions": style}
+
+    if body.title is not None:
+        clip["title"] = clean_text(body.title, 200)
+    if body.hashtags is not None:
+        clip["hashtags"] = clean_tags(body.hashtags)
+
+    with db() as c:
+        running = c.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND status IN (?,?,?,?)",
+                            (user["id"],) + RUNNING_STATES).fetchone()[0]
+    if running >= MAX_RUNNING_PER_USER:
+        raise HTTPException(429, "You already have {} videos processing. Wait for one to finish.".format(running))
+
+    (jdir / "edits.json").write_text(json.dumps({"lines": line_edits, "clips": clip_edits}, ensure_ascii=False),
+                                     encoding="utf-8")
+    (jdir / "clips.json").write_text(json.dumps(picked, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with db() as c:                                         # claim the job; a double click can't start two renders
+        cur = c.execute("UPDATE jobs SET status='rendering', updated_at=?, error=NULL WHERE id=? AND status=?",
+                        (time.time(), job_id, "done"))
+        claimed = cur.rowcount
+    if claimed != 1:
+        raise HTTPException(409, "This video is already being rendered.")
+    executor.submit(finish_render, job_id, {n})
+    return {"job_id": job_id, "status": "rendering"}
+
+
+@app.get("/api/jobs/{job_id}/source")
+def job_source(job_id: str, user: dict = Depends(auth.current_user)):
+    """The original video, so the editor can play the part being captioned. Owner only; supports seeking."""
+    row = get_row(job_id, user)
+    p = Path(row["video_path"])
+    if not p.exists() or UPLOAD_DIR.resolve() not in p.resolve().parents:
+        raise HTTPException(404, "The original video is no longer on the server.")
+    return FileResponse(p, media_type=SOURCE_TYPES.get(p.suffix.lower(), "video/mp4"))
 
 
 def clip_path(job_id, n, user):
